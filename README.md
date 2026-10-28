@@ -18,11 +18,23 @@ exit immediately.
 ## Install
 
 ```console
-$ install -m 755 hfq ~/.local/bin/hfq
-# or: ln -s "$PWD/hfq" ~/.local/bin/hfq
+$ ./setup.sh
 ```
 
-No packaging, no virtualenv, no third-party modules.
+The script creates `.venv`, installs `huggingface_hub` (which provides the
+`hf` CLI) inside it, and symlinks `hf` and `hfq` into `~/.local/bin`:
+
+```console
+$ hfq download ...
+```
+
+`~/.local/bin` is added to your shell path if necessary (fish gets
+`~/.config/fish/conf.d/hfq.fish`; bash/zsh get a marked block in their rc).
+Re-run the script to update the CLI. Overrides: `HFQ_VENV`, `HFQ_BIN_DIR`,
+`PYTHON`.
+
+`hfq` itself has no third-party dependencies; only the wrapped `hf` CLI lives
+in the venv.
 
 ## Use
 
@@ -83,7 +95,7 @@ and confines child output to a scroll region underneath:
 
 Non-TTY output (pipes, logs) degrades to plain text: the header block once,
 then `queued:` / `running:` lines interleaved with raw `hf` output. Children
-run without a PTY in that mode, so progress bars stay out of the log.
+run without a PTY in that mode; whatever `hf` prints is forwarded verbatim.
 
 ## Runtime state
 

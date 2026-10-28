@@ -43,6 +43,9 @@ User-facing behaviour: `README.md`. Internals: `docs/design.md`.
 
 ## Commands
 
+- Setup: `./setup.sh` — creates `.venv`, installs `huggingface_hub` (the `hf`
+  CLI) there, and links `hf` + `hfq` into `~/.local/bin`. Overrides:
+  `HFQ_VENV`, `HFQ_BIN_DIR`, `PYTHON`.
 - Test: `python3 -m unittest discover -s tests -v`
 - Syntax: `python3 -m py_compile hfq`
 - Manual smoke: prepend `tests/stub` to `PATH`, set `HFQ_TEST_LOG`, run
@@ -50,7 +53,8 @@ User-facing behaviour: `README.md`. Internals: `docs/design.md`.
 
 ## Scope guardrails
 
-- No third-party dependencies. stdlib only.
+- No third-party dependencies in `hfq`. The `.venv` exists only for the
+  wrapped `hf` CLI; never import its packages from the executable.
 - No persistence, daemonisation, priorities, retries, or config files unless
   requested; the queue is deliberately in-memory and foreground.
 - Keep the display plain (no colour, no alternate screen, no dashboard).
