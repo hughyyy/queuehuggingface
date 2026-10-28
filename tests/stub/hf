@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Stand-in for the Hugging Face CLI used by the hfq tests."""
+
+import os
+import sys
+import time
+
+log = os.environ["HFQ_TEST_LOG"]
+args = " ".join(sys.argv[1:])
+delay = float(os.environ.get("HFQ_TEST_DELAY", "0.25"))
+steps = int(os.environ.get("HFQ_TEST_STEPS", "3"))
+
+with open(log, "a", encoding="utf-8") as fh:
+    fh.write(f"START {args}\n")
+
+print(f"hf stub: {args}", flush=True)
+print(f"cwd: {os.getcwd()}", flush=True)
+for step in range(steps):
+    print(f"\rdownloading {args}: {step + 1}/{steps}", end="", flush=True)
+    time.sleep(delay)
+print(flush=True)
+
+with open(log, "a", encoding="utf-8") as fh:
+    fh.write(f"END {args}\n")

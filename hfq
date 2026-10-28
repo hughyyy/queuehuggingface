@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""hfq - a single-instance FIFO queue in front of the Hugging Face CLI.
+
+The first invocation becomes the queue owner: it keeps a live list of pending
+commands at the top of the terminal and streams the active `hf` command's
+output below it. Every later invocation hands its arguments to the owner over
+a Unix socket, prints a receipt, and exits.
+
+Standard library only. Linux/POSIX.
+"""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import json
+import os
+import pty
+import selectors
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
+
+APP = "hfq"
+TITLE = "Huggingface Queue Utility"
+SOCKET_NAME = "hfq.sock"
+LOCK_NAME = "hfq.lock"
+ENQUEUE_TIMEOUT = 10.0
+
+USAGE = f"""usage: {APP} [--help] <hf arguments...>
+
+Single-instance FIFO queue in front of the Hugging Face CLI.
+
+The first {APP} invocation becomes the queue owner: it runs its own command,
+then every command queued behind it, one at a time. Later invocations from
+other terminals append their arguments to that queue and exit immediately.
+
+examples:
+  {APP} download Qwen/Qwen3-8B --local-dir ~/models/qwen3-8b
+  {APP} download meta-llama/Llama-3.1-8B --include "*.safetensors"
+
+The queue is in memory and lives as long as the owning terminal. Runtime
+state sits in $XDG_RUNTIME_DIR/{APP} (fallback /tmp/{APP}-<uid>); override
+with HFQ_RUNTIME_DIR.
+"""
+
+
+def runtime_dir() -> str:
+    override = os.environ.get("HFQ_RUNTIME_DIR")
+    if override:
+        path = os.path.abspath(override)
+    else:
+        xdg = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg:
+            path = os.path.join(xdg, APP)
+        else:
+            path = os.path.join(tempfile.gettempdir(), f"{APP}-{os.getuid()}")
+
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise SystemExit(f"{APP}: {path}: not a directory")
+    if st.st_uid != os.getuid():
+        raise SystemExit(f"{APP}: {path}: owned by uid {st.st_uid}, expected {os.getuid()}")
+    if st.st_mode & 0o077:
+        os.chmod(path, 0o700)
+    return path
+
+
+def acquire_lock(path: str):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+            os.close(fd)
+            raise
+        os.close(fd)
+        return None
+    return fd
+
+
+class Item:
+    __slots__ = ("argv", "cwd", "display")
+
+    def __init__(self, argv, cwd=None):
+        self.argv = list(argv)
+        self.cwd = cwd or os.getcwd()
+        self.display = shlex.join(["hf", *self.argv])
+
+
+def truncate(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "\u2026"
+
+
+class Ui:
+    """Header + streaming output pane.
+
+    TTY mode reserves the top rows for the queue and constrains child output
+    to a terminal scroll region below it. Non-TTY mode degrades to a plain
+    log: a header block once, then status lines and raw child output.
+    """
+
+    def __init__(self):
+        self.fd = sys.stdout.fileno()
+        self.tty = os.isatty(self.fd)
+        self.rows = 24
+        self.cols = 80
+        self.header_h = 0
+        self.out_lines = 0
+        self.line_open = False
+        self.measure()
+
+    def measure(self) -> None:
+        try:
+            size = os.get_terminal_size(self.fd)
+        except OSError:
+            size = os.terminal_size((80, 24))
+        self.cols = max(int(size.columns), 20)
+        self.rows = max(int(size.lines), 8)
+
+    def write(self, data) -> None:
+        if isinstance(data, str):
+            data = data.encode()
+        view = memoryview(data)
+        while view:
+            n = os.write(self.fd, view)
+            view = view[n:]
+
+    def start(self) -> None:
+        if self.tty:
+            self.write("\x1b[2J\x1b[H")
+
+    def output(self, data) -> None:
+        """Forward child output and keep a cheap line count for cursor placement.
+
+        Only newlines matter here: progress bars redraw one line with \\r, so
+        header redraws can put the cursor back at the stream's current row
+        instead of pinning the pane to the bottom of the screen.
+        """
+        if isinstance(data, str):
+            data = data.encode()
+        self.write(data)
+        self.out_lines = min(self.out_lines + data.count(b"\n"), self.rows)
+        tail = data.rstrip(b"\r")
+        if tail:
+            self.line_open = not tail.endswith(b"\n")
+
+    def build_header(self, current, queued) -> list[str]:
+        entries = []
+        if current is not None:
+            entries.append("> " + current.display)
+        for item in queued:
+            entries.append("  " + item.display)
+        if not entries:
+            entries.append("  (empty)")
+
+        limit = max(2, self.rows - 6)
+        if len(entries) > limit:
+            hidden = len(entries) - (limit - 1)
+            entries = entries[: limit - 1] + [f"  ... {hidden} more"]
+
+        lines = [TITLE, "Downloads"]
+        lines.extend(entries)
+        lines.append("")
+        return [truncate(line, self.cols - 1) for line in lines]
+
+    def render(self, current, queued, force: bool = False) -> None:
+        lines = self.build_header(current, queued)
+        height = len(lines)
+
+        if not self.tty:
+            if force:
+                self.write("\n".join(lines) + "\n")
+            return
+
+        buf = []
+        if force or self.header_h == 0:
+            # First render, or geometry changed: the old layout is not trusted.
+            buf.append("\x1b[r")
+        elif height > self.header_h:
+            # Make room inside the old text area; output shifts down with it.
+            buf.append(f"\x1b[{self.header_h + 1};{self.rows}r")
+            buf.append(f"\x1b[{self.header_h + 1};1H")
+            buf.append(f"\x1b[{height - self.header_h}L")
+        elif height < self.header_h:
+            # Reclaim header rows, pulling output up behind them.
+            buf.append(f"\x1b[{height + 1};{self.rows}r")
+            buf.append(f"\x1b[{height + 1};1H")
+            buf.append(f"\x1b[{self.header_h - height}M")
+
+        buf.append(f"\x1b[{height + 1};{self.rows}r")
+        buf.append("\x1b[H")
+        for line in lines:
+            buf.append("\x1b[2K")
+            buf.append(line)
+            buf.append("\r\n")
+        row = min(height + 1 + self.out_lines, self.rows)
+        buf.append(f"\x1b[{row};1H")
+        self.write("".join(buf))
+        self.header_h = height
+
+    def notice(self, message: str) -> None:
+        if not self.tty:
+            self.write(message + "\n")
+
+
+def set_winsize(fd: int, rows: int, cols: int) -> None:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except OSError:
+        pass
+
+
+class Child:
+    """One running `hf` command, on a PTY in TTY mode or a plain pipe."""
+
+    def __init__(self, master=None, pid=None, proc=None):
+        self.master = master
+        self.pid = pid
+        self.proc = proc
+        self.fd = master if master is not None else proc.stdout.fileno()
+
+    @classmethod
+    def spawn(cls, item: Item, ui: Ui) -> "Child":
+        cmd = ["hf", *item.argv]
+        if ui.tty:
+            pid, master = pty.fork()
+            if pid == 0:
+                try:
+                    os.chdir(item.cwd)
+                    os.execvpe(cmd[0], cmd, os.environ)
+                except OSError as exc:
+                    try:
+                        os.write(2, f"{APP}: cannot execute {cmd[0]}: {exc}\n".encode())
+                    except OSError:
+                        pass
+                    os._exit(127)
+            os.set_blocking(master, False)
+            set_winsize(master, max(1, ui.rows - ui.header_h), ui.cols)
+            return cls(master=master, pid=pid)
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=item.cwd,
+        )
+        os.set_blocking(proc.stdout.fileno(), False)
+        return cls(proc=proc)
+
+    def finish(self) -> int:
+        if self.master is not None:
+            try:
+                os.close(self.master)
+            except OSError:
+                pass
+            self.master = None
+            try:
+                _, status = os.waitpid(self.pid, 0)
+            except ChildProcessError:
+                return 0
+            return status
+
+        try:
+            self.proc.stdout.close()
+        except OSError:
+            pass
+        return self.proc.wait()
+
+    def terminate(self) -> None:
+        if self.master is not None:
+            try:
+                os.killpg(self.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    wpid, _ = os.waitpid(self.pid, os.WNOHANG)
+                except ChildProcessError:
+                    wpid = self.pid
+                if wpid:
+                    break
+                time.sleep(0.05)
+            else:
+                try:
+                    os.killpg(self.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(self.pid, 0)
+                except ChildProcessError:
+                    pass
+            try:
+                os.close(self.master)
+            except OSError:
+                pass
+            self.master = None
+            return
+
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.proc.wait()
+        try:
+            self.proc.stdout.close()
+        except OSError:
+            pass
+
+
+class Server:
+    def __init__(self, sock_path: str, argv):
+        self.sock_path = sock_path
+        self.argv = argv
+        self.ui = Ui()
+        self.queue: list[Item] = []
+        self.q_lock = threading.Lock()
+        self.closing = False
+        self.stop = threading.Event()
+        self.resize = threading.Event()
+        self.got_signal = False
+        self.listener = None
+        self.wake_r = None
+        self.wake_w = None
+        self.child = None
+        self.current = None
+        self.static_header_printed = False
+
+    # -- socket side ------------------------------------------------------
+
+    def _start_listener(self) -> None:
+        try:
+            os.unlink(self.sock_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise SystemExit(f"{APP}: cannot remove stale socket: {exc}")
+
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(self.sock_path)
+        os.chmod(self.sock_path, 0o600)
+        listener.listen(64)
+        self.listener = listener
+        threading.Thread(target=self._serve_clients, daemon=True).start()
+
+    @staticmethod
+    def _reply(conn, payload) -> None:
+        conn.sendall(json.dumps(payload).encode() + b"\n")
+
+    def _serve_clients(self) -> None:
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            try:
+                self._handle_client(conn)
+            except (OSError, ValueError, TypeError):
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def _handle_client(self, conn) -> None:
+        conn.settimeout(5.0)
+        data = b""
+        while b"\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 65536:
+                break
+
+        line = data.split(b"\n", 1)[0]
+        if not line:
+            self._reply(conn, {"ok": False, "error": "empty request"})
+            return
+
+        try:
+            request = json.loads(line)
+        except ValueError:
+            self._reply(conn, {"ok": False, "error": "invalid request"})
+            return
+        if not isinstance(request, dict):
+            self._reply(conn, {"ok": False, "error": "invalid request"})
+            return
+
+        argv = request.get("argv")
+        if not (
+            isinstance(argv, list)
+            and argv
+            and all(isinstance(arg, str) for arg in argv)
+        ):
+            self._reply(conn, {"ok": False, "error": "argv must be a non-empty list of strings"})
+            return
+
+        cwd = request.get("cwd")
+        if cwd is None:
+            cwd = os.getcwd()
+        if not (isinstance(cwd, str) and os.path.isabs(cwd) and os.path.isdir(cwd)):
+            self._reply(conn, {"ok": False, "error": "cwd must be an existing absolute directory"})
+            return
+
+        item = Item(argv, cwd)
+        with self.q_lock:
+            if self.closing:
+                retry = True
+                pending = 0
+            else:
+                retry = False
+                self.queue.append(item)
+                pending = len(self.queue)
+
+        if retry:
+            self._reply(conn, {"ok": False, "retry": True})
+            return
+
+        self.ui.notice(f"queued: {item.display}")
+        try:
+            os.write(self.wake_w, b"q")
+        except OSError:
+            pass
+        self._reply(conn, {"ok": True, "pending": pending})
+
+    # -- display side -----------------------------------------------------
+
+    def _snapshot(self) -> list[Item]:
+        with self.q_lock:
+            return list(self.queue)
+
+    def _redraw(self, force: bool = False) -> None:
+        with self.q_lock:
+            queued = list(self.queue)
+        self.ui.render(self.current, queued, force=force)
+
+    def _next_item(self):
+        with self.q_lock:
+            if self.queue:
+                return self.queue.pop(0)
+            self.closing = True
+            return None
+
+    def _report_status(self, item, status) -> None:
+        if item is None:
+            return
+        if os.WIFEXITED(status):
+            code = os.WEXITSTATUS(status)
+            if code == 0:
+                return
+            message = f"hf exited with status {code}"
+        elif os.WIFSIGNALED(status):
+            message = f"hf terminated by signal {os.WTERMSIG(status)}"
+        else:
+            message = f"hf exited with status {status}"
+
+        if self.ui.tty:
+            self.ui.output(f"\r\n[{APP}] {message}\r\n")
+        else:
+            self.ui.output(f"[{APP}] {message}\n")
+
+    # -- main loop --------------------------------------------------------
+
+    def _setup_signals(self) -> None:
+        self.wake_r, self.wake_w = os.pipe()
+        os.set_blocking(self.wake_r, False)
+        os.set_blocking(self.wake_w, False)
+        signal.set_wakeup_fd(self.wake_w)
+
+        def handler(signum, frame):
+            if signum == signal.SIGWINCH:
+                self.resize.set()
+            else:
+                self.got_signal = True
+                self.stop.set()
+
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGWINCH):
+            signal.signal(sig, handler)
+
+    def _drain_wake(self) -> None:
+        try:
+            while os.read(self.wake_r, 4096):
+                pass
+        except BlockingIOError:
+            pass
+
+    def _loop(self) -> None:
+        selector = selectors.DefaultSelector()
+        selector.register(self.wake_r, selectors.EVENT_READ, "wake")
+        try:
+            while not self.stop.is_set():
+                if self.child is None:
+                    self.current = self._next_item()
+                    if self.current is None:
+                        self.ui.render(None, [])
+                        return
+
+                    if self.ui.line_open:
+                        self.ui.output("\r\n" if self.ui.tty else "\n")
+
+                    queued = self._snapshot()
+                    if not self.ui.tty and not self.static_header_printed:
+                        self.ui.render(self.current, queued, force=True)
+                        self.static_header_printed = True
+                    else:
+                        self.ui.render(self.current, queued)
+                    if not self.ui.tty:
+                        self.ui.notice(f"running: {self.current.display}")
+
+                    try:
+                        self.child = Child.spawn(self.current, self.ui)
+                    except OSError as exc:
+                        self.ui.output(f"[{APP}] cannot start hf: {exc}\n")
+                        self.current = None
+                        continue
+                    selector.register(self.child.fd, selectors.EVENT_READ, "out")
+
+                for key, _ in selector.select():
+                    if key.data == "wake":
+                        self._drain_wake()
+                        if self.stop.is_set():
+                            break
+                        force = False
+                        if self.resize.is_set():
+                            self.resize.clear()
+                            self.ui.measure()
+                            if self.child is not None and self.child.master is not None:
+                                set_winsize(self.child.master, self.ui.rows, self.ui.cols)
+                            if self.ui.tty:
+                                self.ui.write("\x1b[r\x1b[2J\x1b[H")
+                                self.ui.header_h = 0
+                                self.ui.out_lines = 0
+                                self.ui.line_open = False
+                            force = True
+                        self._redraw(force=force)
+                        continue
+
+                    try:
+                        data = os.read(self.child.fd, 65536)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            data = b""
+                        else:
+                            raise
+
+                    if data:
+                        self.ui.output(data)
+                        continue
+
+                    selector.unregister(self.child.fd)
+                    status = self.child.finish()
+                    self.child = None
+                    self._report_status(self.current, status)
+                    self.current = None
+                    break
+        finally:
+            selector.close()
+
+    def _cleanup(self) -> None:
+        self.stop.set()
+        with self.q_lock:
+            self.closing = True
+
+        if self.listener is not None:
+            try:
+                self.listener.close()
+            except OSError:
+                pass
+            self.listener = None
+        try:
+            os.unlink(self.sock_path)
+        except OSError:
+            pass
+
+        if self.child is not None:
+            self.child.terminate()
+            self.child = None
+
+        if self.wake_r is not None:
+            try:
+                signal.set_wakeup_fd(-1)
+            except (ValueError, OSError):
+                pass
+            for fd in (self.wake_r, self.wake_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self.wake_r = self.wake_w = None
+
+        if self.ui.tty:
+            try:
+                # CSI r homes the cursor; put it back at the end of the stream
+                # before yielding the terminal to the shell.
+                row = min(self.ui.header_h + 1 + self.ui.out_lines, self.ui.rows)
+                self.ui.write(f"\x1b[r\x1b[{row};1H\n")
+            except OSError:
+                pass
+
+    def run(self) -> int:
+        self.ui.start()
+        self._setup_signals()
+        with self.q_lock:
+            self.queue.append(Item(self.argv))
+        self._start_listener()
+        try:
+            self._loop()
+        finally:
+            self._cleanup()
+        return 130 if self.got_signal else 0
+
+
+def try_enqueue(sock_path: str, argv):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(ENQUEUE_TIMEOUT)
+        sock.connect(sock_path)
+        request = {"argv": list(argv), "cwd": os.getcwd()}
+        sock.sendall(json.dumps(request).encode() + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+    try:
+        return json.loads(buf.split(b"\n", 1)[0])
+    except ValueError:
+        return None
+
+
+def main(argv) -> int:
+    if not argv:
+        sys.stderr.write(USAGE)
+        return 2
+    if len(argv) == 1 and argv[0] in ("-h", "--help"):
+        sys.stdout.write(USAGE)
+        return 0
+
+    runtime = runtime_dir()
+    sock_path = os.path.join(runtime, SOCKET_NAME)
+    lock_path = os.path.join(runtime, LOCK_NAME)
+    deadline = time.monotonic() + ENQUEUE_TIMEOUT
+
+    while True:
+        response = try_enqueue(sock_path, argv)
+        if response is not None:
+            if response.get("ok"):
+                pending = response.get("pending")
+                suffix = f" ({pending} pending)" if isinstance(pending, int) else ""
+                print(f"queued: {shlex.join(['hf', *argv])}{suffix}")
+                return 0
+            if not response.get("retry"):
+                sys.stderr.write(f"{APP}: {response.get('error', 'request rejected')}\n")
+                return 1
+            # The owner is draining and exiting; fall through to take over.
+
+        lock_fd = acquire_lock(lock_path)
+        if lock_fd is not None:
+            if shutil.which("hf") is None:
+                os.close(lock_fd)
+                sys.stderr.write(f"{APP}: `hf` not found on PATH\n")
+                return 127
+            try:
+                # lock_fd stays open for the owner's lifetime.
+                return Server(sock_path, argv).run()
+            finally:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+
+        if time.monotonic() >= deadline:
+            sys.stderr.write(f"{APP}: could not reach the running queue\n")
+            return 1
+        time.sleep(0.05)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        try:
+            os.close(1)
+        except OSError:
+            pass
+        sys.exit(141)
