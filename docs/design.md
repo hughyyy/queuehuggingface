@@ -1,21 +1,23 @@
-# hfq design
+# QueueHuggingFace (`qhf`) design
 
-Status: implemented, 2026-10-28. One executable, Python stdlib only.
+Status: implemented, renamed 2026-11-07. One executable, Python stdlib only.
+The project was called `hfq` until the rename; socket, lock, runtime directory
+and environment variables are now `qhf`/`QHF_`.
 
 ## Process model
 
 ```mermaid
 sequenceDiagram
     participant T1 as Terminal 1
-    participant C as hfq client
-    participant O as hfq owner
+    participant C as qhf client
+    participant O as qhf owner
     participant H as hf child
 
-    T1->>O: hfq download A (no lock/socket -> owner)
+    T1->>O: qhf download A (no lock/socket -> owner)
     O->>H: fork/exec hf download A
     H-->>O: PTY output
     O-->>T1: header + live output
-    C->>O: connect hfq.sock {argv, cwd}
+    C->>O: connect qhf.sock {argv, cwd}
     O->>O: queue.append(B)
     O-->>C: {"ok": true}
     C-->>T1: queued: hf download B
@@ -24,13 +26,13 @@ sequenceDiagram
 ```
 
 There is exactly one owner per runtime directory. Ownership is decided by
-`fcntl.flock(LOCK_EX | LOCK_NB)` on `hfq.lock`; the lock is held for the
+`fcntl.flock(LOCK_EX | LOCK_NB)` on `qhf.lock`; the lock is held for the
 owner's lifetime and released by process exit. Clients try the socket first;
 if a socket exists but the owner is exiting, the owner answers
 `{"ok": false, "retry": true}` and the client loops. When the lock is free it
 becomes the next owner, enqueueing its own argv before listening.
 
-The socket is `SOCK_STREAM` at `hfq.sock`, directory `0700`, socket `0600`.
+The socket is `SOCK_STREAM` at `qhf.sock`, directory `0700`, socket `0600`.
 The listener thread accepts connections serially; each request is one JSON
 line, max 64 KiB, with a 5 s read timeout.
 
@@ -81,7 +83,7 @@ Non-TTY owner:
 - The pipe is read non-blocking and forwarded verbatim.
 
 Exit status: `0` is silent; anything else emits
-`[hfq] hf exited with status N` (or `terminated by signal N`) into the output
+`[qhf] hf exited with status N` (or `terminated by signal N`) into the output
 area and the queue continues.
 
 ## Display
@@ -89,7 +91,7 @@ area and the queue continues.
 The TTY layout reserves rows `1..header_h`:
 
 ```text
-Huggingface Queue Utility     row 1
+QueueHuggingFace     row 1
 Downloads                     row 2
 > active command              row 3
   queued command              ...

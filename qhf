@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hfq - a single-instance FIFO queue in front of the Hugging Face CLI.
+"""qhf - a single-instance FIFO queue in front of the Hugging Face CLI.
 
 The first invocation becomes the queue owner: it keeps a live list of pending
 commands at the top of the terminal and streams the active `hf` command's
@@ -30,10 +30,10 @@ import termios
 import threading
 import time
 
-APP = "hfq"
-TITLE = "Huggingface Queue Utility"
-SOCKET_NAME = "hfq.sock"
-LOCK_NAME = "hfq.lock"
+APP = "qhf"
+TITLE = "QueueHuggingFace"
+SOCKET_NAME = "qhf.sock"
+LOCK_NAME = "qhf.lock"
 ENQUEUE_TIMEOUT = 10.0
 
 USAGE = f"""usage: {APP} [--help] <hf arguments...>
@@ -50,12 +50,12 @@ examples:
 
 The queue is in memory and lives as long as the owning terminal. Runtime
 state sits in $XDG_RUNTIME_DIR/{APP} (fallback /tmp/{APP}-<uid>); override
-with HFQ_RUNTIME_DIR.
+with QHF_RUNTIME_DIR.
 """
 
 
 def runtime_dir() -> str:
-    override = os.environ.get("HFQ_RUNTIME_DIR")
+    override = os.environ.get("QHF_RUNTIME_DIR")
     if override:
         path = os.path.abspath(override)
     else:

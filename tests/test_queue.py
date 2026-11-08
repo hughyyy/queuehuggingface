@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for hfq using a stub `hf` on PATH."""
+"""End-to-end tests for qhf using a stub `hf` on PATH."""
 
 import fcntl
 import os
@@ -15,21 +15,21 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HFQ = os.path.join(ROOT, "hfq")
+QHF = os.path.join(ROOT, "qhf")
 STUB_DIR = os.path.join(ROOT, "tests", "stub")
 
 
 class Harness:
     def __init__(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="hfq-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="qhf-test-")
         self.root = self.tmp.name
         self.runtime = os.path.join(self.root, "runtime")
         self.log = os.path.join(self.root, "hf.log")
         self.env = os.environ.copy()
-        self.env["HFQ_RUNTIME_DIR"] = self.runtime
-        self.env["HFQ_TEST_LOG"] = self.log
-        self.env["HFQ_TEST_DELAY"] = "0.25"
-        self.env["HFQ_TEST_STEPS"] = "3"
+        self.env["QHF_RUNTIME_DIR"] = self.runtime
+        self.env["QHF_TEST_LOG"] = self.log
+        self.env["QHF_TEST_DELAY"] = "0.25"
+        self.env["QHF_TEST_STEPS"] = "3"
         self.env["PATH"] = STUB_DIR + os.pathsep + self.env.get("PATH", "")
         self.proc = None
         self.master = None
@@ -63,7 +63,7 @@ class Harness:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         self.proc = subprocess.Popen(
-            [sys.executable, HFQ, *args],
+            [sys.executable, QHF, *args],
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -87,7 +87,7 @@ class Harness:
 
     def enqueue(self, *args):
         return subprocess.run(
-            [sys.executable, HFQ, *args],
+            [sys.executable, QHF, *args],
             env=self.env,
             capture_output=True,
             text=True,
@@ -134,7 +134,7 @@ class QueueBehaviorTest(unittest.TestCase):
         # Both arrivals are drawn in the header while alpha is still active.
         text = h.wait_for("  hf download gamma")
         header = re.search(
-            r"Huggingface Queue Utility.*?Downloads.*?"
+            r"QueueHuggingFace.*?Downloads.*?"
             r"> hf download alpha.*?"
             r"  hf download beta --quiet.*?"
             r"  hf download gamma",
@@ -160,14 +160,14 @@ class QueueBehaviorTest(unittest.TestCase):
         )
 
         text = h.transcript.decode("utf-8", "replace")
-        self.assertIn("Huggingface Queue Utility", text)
+        self.assertIn("QueueHuggingFace", text)
         self.assertNotIn("Traceback", text)
         # Only one hf process ran at a time: the stub's START/END alternate.
 
     def test_queue_survives_non_tty_and_releases_lock(self):
         h = self.h
         proc = subprocess.Popen(
-            [sys.executable, HFQ, "download", "delta"],
+            [sys.executable, QHF, "download", "delta"],
             env=h.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -197,7 +197,7 @@ class QueueBehaviorTest(unittest.TestCase):
 
         # The owner has exited; a fresh invocation must become the new owner.
         fresh = subprocess.run(
-            [sys.executable, HFQ, "download", "zeta"],
+            [sys.executable, QHF, "download", "zeta"],
             env=h.env,
             capture_output=True,
             text=True,
@@ -214,7 +214,7 @@ class QueueBehaviorTest(unittest.TestCase):
         client_dir = os.path.join(h.root, "client-dir")
         os.makedirs(client_dir)
         reply = subprocess.run(
-            [sys.executable, HFQ, "download", "two"],
+            [sys.executable, QHF, "download", "two"],
             cwd=client_dir,
             env=h.env,
             capture_output=True,
@@ -236,7 +236,7 @@ class QueueBehaviorTest(unittest.TestCase):
 
         clients = [
             subprocess.Popen(
-                [sys.executable, HFQ, "download", f"c{i}"],
+                [sys.executable, QHF, "download", f"c{i}"],
                 env=h.env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -268,7 +268,7 @@ class QueueBehaviorTest(unittest.TestCase):
 
     def test_help(self):
         result = subprocess.run(
-            [sys.executable, HFQ, "--help"],
+            [sys.executable, QHF, "--help"],
             env=self.h.env,
             capture_output=True,
             text=True,
@@ -276,7 +276,7 @@ class QueueBehaviorTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("Single-instance FIFO queue", result.stdout)
-        self.assertIn("hfq download", result.stdout)
+        self.assertIn("qhf download", result.stdout)
 
 
 if __name__ == "__main__":

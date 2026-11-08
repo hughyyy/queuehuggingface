@@ -1,27 +1,29 @@
-# AGENTS.md — hfq
+# AGENTS.md — QueueHuggingFace (`qhf`)
 
 Context for AI-assisted contributors. Read before editing.
 
 ## What this is
 
-`hfq` is a single-file, zero-dependency (Python stdlib only) console wrapper
-around the Hugging Face CLI. The first process owns an in-memory FIFO queue;
+QueueHuggingFace (`qhf`) is a single-file, zero-dependency (Python stdlib
+only) console wrapper around the Hugging Face CLI. The first process owns an in-memory FIFO queue;
 later processes hand it argv + cwd over a Unix socket and exit. The owner runs
 `hf` children sequentially and renders the queue above their live output.
 User-facing behaviour: `README.md`. Internals: `docs/design.md`.
 
 ## Entry points
 
-- `hfq` — the whole application: client path, owner/server, display, PTY
+- `qhf` — the whole application: client path, owner/server, display, PTY
   forwarding. Keep it a single file; it is installed by copying/symlinking.
 - `tests/test_queue.py` — end-to-end suite driving the real executable.
-- `tests/stub/hf` — stub CLI; logs `START`/`END` to `HFQ_TEST_LOG`, prints
+- `tests/stub/hf` — stub CLI; logs `START`/`END` to `QHF_TEST_LOG`, prints
   progress, reports its cwd.
+- `docs/plan-configurator.md` — proposal for `qhf <repo-or-url>` file
+  selection; not implemented yet.
 
 ## Invariants
 
 - **One owner.** Ownership is an exclusive non-blocking `flock` on
-  `$HFQ_RUNTIME_DIR/hfq.lock`. Never start a second downloader path.
+  `$QHF_RUNTIME_DIR/qhf.lock`. Never start a second downloader path.
 - **FIFO, one child at a time.** The main thread pops from `self.queue`; the
   client thread only appends and writes a wake byte. Do not run children in
   parallel.
@@ -44,16 +46,16 @@ User-facing behaviour: `README.md`. Internals: `docs/design.md`.
 ## Commands
 
 - Setup: `./setup.sh` — creates `.venv`, installs `huggingface_hub` (the `hf`
-  CLI) there, and links `hf` + `hfq` into `~/.local/bin`. Overrides:
-  `HFQ_VENV`, `HFQ_BIN_DIR`, `PYTHON`.
+  CLI) there, and links `hf` + `qhf` into `~/.local/bin`. Overrides:
+  `QHF_VENV`, `QHF_BIN_DIR`, `PYTHON`.
 - Test: `python3 -m unittest discover -s tests -v`
-- Syntax: `python3 -m py_compile hfq`
-- Manual smoke: prepend `tests/stub` to `PATH`, set `HFQ_TEST_LOG`, run
-  `./hfq download a`, then `./hfq download b` from another shell.
+- Syntax: `python3 -m py_compile qhf`
+- Manual smoke: prepend `tests/stub` to `PATH`, set `QHF_TEST_LOG`, run
+  `./qhf download a`, then `./qhf download b` from another shell.
 
 ## Scope guardrails
 
-- No third-party dependencies in `hfq`. The `.venv` exists only for the
+- No third-party dependencies in `qhf`. The `.venv` exists only for the
   wrapped `hf` CLI; never import its packages from the executable.
 - No persistence, daemonisation, priorities, retries, or config files unless
   requested; the queue is deliberately in-memory and foreground.
