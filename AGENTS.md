@@ -2,23 +2,30 @@
 
 Context for AI-assisted contributors. Read before editing.
 
-## What this is
+## Overview
 
-QueueHuggingFace (`qhf`) is a single-file, zero-dependency (Python stdlib
-only) console wrapper around the Hugging Face CLI. The first process owns an in-memory FIFO queue;
-later processes hand it argv + cwd over a Unix socket and exit. The owner runs
-`hf` children sequentially and renders the queue above their live output.
-User-facing behaviour: `README.md`. Internals: `docs/design.md`.
+- **What this is:** QueueHuggingFace (`qhf`), a single-file, zero-dependency
+  (Python stdlib only) console wrapper around the Hugging Face CLI. The first
+  process owns an in-memory FIFO queue; later processes hand it argv + cwd
+  over a Unix socket and exit. The owner runs `hf` children sequentially and
+  renders the queue above their live output.
+- **User-facing behaviour:** `README.md`.
+- **Vocabulary:** `CONTEXT.md`.
+- **Internals:** `docs/design.md`.
+- **Current state / next actions:** `docs/handover.md`.
+- **Remote:** `origin` → `https://github.com/hughyyy/queuehuggingface.git`,
+  branch `main`.
 
 ## Entry points
 
 - `qhf` — the whole application: client path, owner/server, display, PTY
-  forwarding. Keep it a single file; it is installed by copying/symlinking.
-- `tests/test_queue.py` — end-to-end suite driving the real executable.
-- `tests/stub/hf` — stub CLI; logs `START`/`END` to `QHF_TEST_LOG`, prints
-  progress, reports its cwd.
-- `docs/plan-configurator.md` — proposal for `qhf <repo-or-url>` file
-  selection; not implemented yet.
+  forwarding. Keep it a single file; it is deployed by symlink.
+- `tests/test_queue.py` — end-to-end tests against a stub `hf`.
+- `tests/stub/hf` — stub CLI; prints its cwd and args and records
+  `START`/`END` lines in `$QHF_TEST_LOG`.
+- `docs/plan-configurator.md` — the proposed subcommand/listing/selector
+  design; not implemented.
+- `setup.sh` — venv, `hf`, and PATH provisioning.
 
 ## Invariants
 
@@ -45,13 +52,16 @@ User-facing behaviour: `README.md`. Internals: `docs/design.md`.
 
 ## Commands
 
-- Setup: `./setup.sh` — creates `.venv`, installs `huggingface_hub` (the `hf`
-  CLI) there, and links `hf` + `qhf` into `~/.local/bin`. Overrides:
-  `QHF_VENV`, `QHF_BIN_DIR`, `PYTHON`.
+- Setup: `./setup.sh` — creates/reuses `.venv`, installs `huggingface_hub`
+  (the `hf` CLI) there, links `qhf` into `~/.local/bin`, and links the venv's
+  `hf` only when no `hf` already exists. Overrides: `QHF_VENV`,
+  `QHF_BIN_DIR`, `PYTHON`.
 - Test: `python3 -m unittest discover -s tests -v`
 - Syntax: `python3 -m py_compile qhf`
 - Manual smoke: prepend `tests/stub` to `PATH`, set `QHF_TEST_LOG`, run
   `./qhf download a`, then `./qhf download b` from another shell.
+- Real smoke (network): `qhf download sshleifer/tiny-gpt2 --local-dir
+  /tmp/qhf-smoke`.
 
 ## Scope guardrails
 
@@ -61,3 +71,8 @@ User-facing behaviour: `README.md`. Internals: `docs/design.md`.
   requested; the queue is deliberately in-memory and foreground.
 - Keep the display plain (no colour, no alternate screen, no dashboard).
 - Do not change the socket protocol silently; document it in `docs/design.md`.
+- Update `README.md` when user-facing behaviour changes; update `CONTEXT.md`
+  when terminology or boundaries change; update `docs/handover.md` when state
+  or next actions change.
+- After edits: `python3 -m py_compile qhf` and the full test suite. Verify
+  both TTY and non-TTY paths when touching display or child execution.
