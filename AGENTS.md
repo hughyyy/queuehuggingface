@@ -13,8 +13,8 @@ Context for AI-assisted contributors. Read before editing.
 - **Vocabulary:** `CONTEXT.md`.
 - **Internals:** `docs/design.md`.
 - **Current state / next actions:** `docs/handover.md`.
-- **Remote:** `origin` → `https://github.com/hughyyy/queuehuggingface.git`,
-  branch `main`.
+- **Remote:** `origin` → `https://github.com/hughyyy/queuehuggingface.git`
+  (public), branch `main`.
 
 ## Entry points
 
@@ -57,6 +57,7 @@ Context for AI-assisted contributors. Read before editing.
   `hf` only when no `hf` already exists. Overrides: `QHF_VENV`,
   `QHF_BIN_DIR`, `PYTHON`.
 - Test: `python3 -m unittest discover -s tests -v`
+- CI: `.github/workflows/ci.yml` runs compile + unittest on Python 3.10/3.12.
 - Syntax: `python3 -m py_compile qhf`
 - Manual smoke: prepend `tests/stub` to `PATH`, set `QHF_TEST_LOG`, run
   `./qhf download a`, then `./qhf download b` from another shell.

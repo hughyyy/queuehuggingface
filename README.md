@@ -1,5 +1,11 @@
 # QueueHuggingFace (`qhf`)
 
+> **One queue for every Hugging Face download — first in, first served, live output.**
+
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://github.com/hughyyy/queuehuggingface)
+[![CI](https://github.com/hughyyy/queuehuggingface/actions/workflows/ci.yml/badge.svg)](https://github.com/hughyyy/queuehuggingface/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/hughyyy/queuehuggingface/blob/main/LICENSE)
+
 Zero-dependency, single-instance FIFO queue in front of the Hugging Face CLI.
 Invoke `qhf download ...` instead of `hf download ...`: the first process owns
 the queue, shows the active command and everything waiting behind it, and
@@ -225,7 +231,7 @@ $ python3 -m py_compile qhf
 The suite drives the real executable with `tests/stub/hf` on `PATH`; it covers
 FIFO ordering, sequential execution, live header rendering, concurrent
 clients, cwd preservation, non-TTY operation, and owner handover after the
-queue drains. No network is required.
+queue drains. No network is required. CI runs it on Python 3.10 and 3.12.
 
 Manual stub smoke:
 
@@ -271,3 +277,7 @@ multi-select files/directories, choose a destination and revision, then queue
 one constructed `hf download` command. The design, API details, phases, and
 test strategy are in [`docs/plan-configurator.md`](docs/plan-configurator.md).
 Not implemented yet; `qhf download ...` remains the fast path.
+
+## License
+
+MIT — see [`LICENSE`](https://github.com/hughyyy/queuehuggingface/blob/main/LICENSE).

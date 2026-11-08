@@ -78,7 +78,7 @@ The command name is the UX: type `q`, complete to `qhf`, paste a repo.
   already on `PATH`.
 - [V] A pre-existing `hf` 2.0+ install resolves from `~/.local/bin/hf`; the
   setup script installs a venv fallback but does not replace that symlink.
-- [V] Remote: `github.com/hughyyy/queuehuggingface` (private), branch `main`.
+- [V] Remote: `github.com/hughyyy/queuehuggingface` (public), branch `main`.
 - [V] The Hub tree API response shape and pagination were checked against a
   live public repo; see the plan doc.
 

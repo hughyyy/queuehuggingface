@@ -7,26 +7,28 @@ page for state and next actions.
 
 - Working: single-owner FIFO queue, pass-through `qhf <hf args>`, live TTY
   view, PTY forwarding, non-TTY log mode, Ctrl-C cleanup, resize handling.
-- Tests: 5/5 (`python3 -m unittest discover -s tests -v`).
+- Tests: 5/5 (`python3 -m unittest discover -s tests -v`); CI runs the suite
+  on Python 3.10 and 3.12.
 - Real CLI verified: `qhf download sshleifer/tiny-gpt2 --local-dir ...`
-  completed with `hf` 2.4.0.
+  completed with a current `hf` install.
 - Renamed from `hfq`; runtime/env identifiers are now `qhf` / `QHF_*`.
-- Remote: `https://github.com/hughyyy/queuehuggingface.git` (private),
+- Remote: `https://github.com/hughyyy/queuehuggingface.git` (**public**),
   branch `main`.
+- License: MIT (`LICENSE`).
 - Not implemented: download configurator. Proposal:
   [`plan-configurator.md`](plan-configurator.md).
 
 ## Run it now
 
 ```console
-$ cd /mnt/vmshare/02-llm-inference/queue-huggingface
+$ cd /path/to/queue-huggingface
 $ ./setup.sh          # idempotent; recreates a stale venv and links qhf
 $ qhf download <repo> --local-dir <dir>
 ```
 
-`~/.local/bin/qhf` is the installed entry point. On this host `hf` resolves
-via `~/.local/bin/hf` to a user-managed `.hf-cli` venv (2.4.0); the project
-`.venv` is a fallback that setup only links when no `hf` exists.
+`~/.local/bin/qhf` is the installed entry point. A user-managed `hf` on
+`PATH` is used as-is; the project `.venv` is a fallback that setup only links
+when no `hf` exists.
 
 ## Verify a change
 
@@ -109,8 +111,7 @@ Protocol and display math: [`design.md`](design.md).
 - **Owner environment.** Children inherit the owner's env; client env (token,
   proxies) is not forwarded.
 - **Existing `hf` installs.** `setup.sh` leaves a non-dangling `hf` symlink
-  alone. On this host that is `~/.hf-cli`; check `command -v hf` before
-  debugging version issues.
+  alone; check `command -v hf` before debugging version issues.
 - **Test PTY size.** `tests/test_queue.py` sets 100×30 on the slave PTY;
   without it the display clamps to 20×8 and header assertions truncate.
 
@@ -134,6 +135,7 @@ Acceptance criteria and risks: [`plan-configurator.md`](plan-configurator.md).
 
 - `python3 -m py_compile qhf`
 - `python3 -m unittest discover -s tests -v` (all green)
+- CI green on Python 3.10 and 3.12 (`.github/workflows/ci.yml`)
 - No third-party imports in `qhf`
 - Protocol or display changes reflected in `docs/design.md`
 - README/CONTEXT/handover updated if behaviour or state changed
